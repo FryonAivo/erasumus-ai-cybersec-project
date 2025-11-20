@@ -1,49 +1,69 @@
 import pandas as pd
+import joblib
 
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.tree import DecisionTreeClassifier
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
 from sklearn.metrics import classification_report, confusion_matrix
 
-df = pd.read_csv('./datasets/phishing_url_features_combined_1.csv')
+# Load dataset
+df = pd.read_csv('./datasets/main_dataset.csv')
 
-target_column = 'phishing'
+# Columns to drop due to high cardinality / noise
+DROP_COLS = ["FILENAME", "URL", "Domain"]
+
+# Drop them safely if present
+df = df.drop(columns=[c for c in DROP_COLS if c in df.columns])
+
+target_column = "label"
+
 X = df.drop(target_column, axis=1)
 y = df[target_column]
 
-# The main ensemble model we're gonna use for decision-making
-model = RandomForestClassifier(
-    n_estimators=50,
-    max_depth=15,
-    min_samples_split=10,
-    min_samples_leaf=5,
-    random_state=1,
-    n_jobs=1
+# Keep ONLY TLD as categorical
+categorical_cols = ["TLD"] if "TLD" in X.columns else []
+
+# Drop ALL other object columns
+other_object_cols = X.select_dtypes(include=["object"]).columns
+other_object_cols = [c for c in other_object_cols if c not in categorical_cols]
+
+X = X.drop(columns=other_object_cols)
+
+# Recompute numeric columns
+numeric_cols = X.select_dtypes(exclude=["object"]).columns.tolist()
+
+preprocess = ColumnTransformer(
+    transformers=[
+        ("tld", OneHotEncoder(handle_unknown="ignore", sparse_output=False), categorical_cols),
+    ],
+    remainder='passthrough'
 )
 
-# Example Decision Tree classifier for cross-testing
-# model_2 = DecisionTreeClassifier(
-#     max_depth=15,
-#     min_samples_split=10,
-#     min_samples_leaf=5,
-#     random_state=1,
-# )
+model = RandomForestClassifier(
+    n_estimators=150,
+    max_depth=22,
+    min_samples_split=8,
+    min_samples_leaf=4,
+    n_jobs=4
+)
+
+pipeline = Pipeline(steps=[
+    ("preprocess", preprocess),
+    ("model", model)
+])
 
 X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, stratify=y, random_state=1
+    X, y, test_size=0.2, stratify=y
 )
 
-model.fit(X_train, y_train)
+pipeline.fit(X_train, y_train)
 
-# model_2.fit(X_train,y_train)
+joblib.dump(pipeline, "model.pkl")
 
-y_pred = model.predict(X_test)
-
-# y_pred_2 = model_2.predict(X_test)
+y_pred = pipeline.predict(X_test)
 
 print(classification_report(y_test, y_pred))
-print(f"Confusion matrix: \n")
+print("Confusion matrix:\n")
 print(confusion_matrix(y_test, y_pred))
-
-# print("Model 2 result: \n")
-# print(classification_report(y_test, y_pred_2))
