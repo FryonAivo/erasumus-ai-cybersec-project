@@ -1,118 +1,109 @@
+# app.py
 import streamlit as st
 import joblib
 import pandas as pd
-from url_feature_extraction import extract_features  # Make sure this file contains your function
+
+from url_feature_extraction import extract_features
+from transform_utils import select_url_column, select_numeric_columns
 
 
-# -----------------------------
-# MODEL LOADING
-# -----------------------------
-def load_model():
-    try:
-        return joblib.load('model.pkl')
-    except:
-        return None
 
+# ------------------------------------------------------------
+# RULE ENGINE (Paranoia Mode)
+# ------------------------------------------------------------
+def rule_based_checks(url: str, feats: dict):
+    # Suspicious TLD
+    if feats["IsRiskyTLD"]:
+        return True
 
-# -----------------------------
-# SIMPLE DB CHECKS
-# -----------------------------
-def check_databases(url):
-    """
-    Checks the whitelist and blacklist.
-    Returns: (Status, Description, Probability) or None.
-    """
-    BLACKLIST = [
-        "http://malicious-site.com",
-        "http://virus-download.net",
-        "bad-email@hacker.com"
+    # High randomness (common in phishing kits)
+    if feats["Entropy"] > 4.2:
+        return True
+
+    # Long URLs are highly suspicious
+    if feats["URLLength"] > 120:
+        return True
+
+    # Too many subdomains (hidden phishing)
+    if feats["SubdomainCount"] >= 3:
+        return True
+
+    # Unicode (IDN homograph)
+    if feats["ContainsUnicode"]:
+        return True
+
+    # "@" inside URL
+    if feats["HasAtSymbol"]:
+        return True
+
+    # Digit-heavy (randomized phishing paths)
+    if feats["DigitRatio"] > 0.35:
+        return True
+
+    # Keyword-based flags
+    phishing_keywords = [
+        "login", "signin", "secure", "verify", "wallet",
+        "reset", "update", "confirm", "checkout"
     ]
+    if any(k in url.lower() for k in phishing_keywords):
+        return True
 
-    if url in BLACKLIST:
-        return ("DANGER", "Found in known malicious Blacklist.", 1.0)
-
-    WHITELIST = [
-        "http://google.com",
-        "https://google.com",
-        "https://www.google.com",
-        "https://www.amazon.com",
-        "https://github.com"
-    ]
-
-    if url in WHITELIST:
-        return ("SAFE", "Found in Trusted Whitelist.", 0.0)
-
-    return None  # Continue to ML model
+    return False
 
 
-# -----------------------------
-# MAIN PREDICTION LOGIC
-# -----------------------------
-def analyze_url(url, model):
-    # 1. DB Check
-    db_result = check_databases(url)
-    if db_result:
-        return db_result
+# ------------------------------------------------------------
+# ML + Rule Engine Decision
+# ------------------------------------------------------------
+def analyze_url(url: str, model):
+    # Extract structured numeric features
+    feats = extract_features(url)
 
-    # 2. ML Model Check
-    features = extract_features(url)
-    df = pd.DataFrame([features])
+    # RULE OVERRIDE (very suspicious → bypass ML)
+    if rule_based_checks(url, feats):
+        return (
+            "PHISHING",
+            "Rule-based suspicion triggered",
+            0.99,
+            feats
+        )
 
-    prediction = model.predict(df)[0]
-    probability = model.predict_proba(df)[0][1]
+    # Prepare data for model (must match training format)
+    row = feats.copy()
+    row["url"] = url
 
-    if prediction == 1:
-        return ("PHISHING DETECTED", "Suspicious patterns found.", probability)
-    else:
-        return ("SAFE", "No threatening characteristics detected.", probability)
+    X_df = pd.DataFrame([row])
+
+    # ML prediction
+    prob_phish = model.predict_proba(X_df)[0][1]
+    label = "PHISHING" if prob_phish > 0.45 else "SAFE"
+
+    return label, "ML-based decision", prob_phish, feats
 
 
-# -----------------------------
+# ------------------------------------------------------------
 # STREAMLIT UI
-# -----------------------------
-st.set_page_config(page_title="Phishing Detector", page_icon="🛡️")
-st.title("🛡️ AI Phishing Detection System")
-st.markdown("### Erasmus AI & CyberSec Project")
-st.markdown("Enter a URL to verify its safety.")
+# ------------------------------------------------------------
+st.set_page_config(page_title="URL Phishing Detector", page_icon="🛡️")
+st.title("🛡️ Hybrid Phishing Detector")
+st.write("This system uses lexical analysis, numeric URL features, ML, and a paranoia rule engine.")
 
-model = load_model()
+# Load Model
+model = joblib.load("model.pkl")
 
-if model is None:
-    st.error("⚠️ ERROR: 'model.pkl' missing. Train the model before using the app.")
-else:
-    url_input = st.text_input("Paste URL:", placeholder="https://example.com")
+# Input
+url_input = st.text_input("Enter URL to analyze:", placeholder="https://example.com")
 
-    if st.button("Analyze URL"):
-        if not url_input:
-            st.warning("Please enter a URL.")
-        else:
-            with st.spinner("Analyzing URL with AI model..."):
-                label, desc, probability = analyze_url(url_input, model)
+if st.button("Analyze URL"):
+    if not url_input.strip():
+        st.warning("Please enter a URL.")
+    else:
+        label, reason, probability, feats = analyze_url(url_input, model)
 
-            st.divider()
-            col1, col2 = st.columns([2, 1])
+        st.subheader(f"Result: **{label}**")
+        st.write(f"Reason: **{reason}**")
+        st.write(f"Suspicion Score: **{probability:.2f}**")
 
-            with col1:
-                if label == "SAFE":
-                    st.success(f"✅ STATUS: {label}")
-                    st.balloons()
-                elif label == "DANGER":
-                    st.error(f"🚨 STATUS: {label}")
-                else:
-                    st.warning(f"⚠️ STATUS: {label}")
+        st.progress(float(probability))
 
-                st.write(f"**Report:** {desc}")
-
-            with col2:
-                st.write("**Risk Level:**")
-                risk_score = int(probability * 100)
-                st.progress(risk_score)
-                st.caption(f"{risk_score}% Risk")
-
-            with st.expander("Technical Details"):
-                st.json({
-                    "URL": url_input,
-                    "Prediction": label,
-                    "Risk Score": risk_score,
-                    "Check Type": "Database" if probability in [0.0, 1.0] else "AI Model"
-                })
+        with st.expander("Show Extracted Feature Values"):
+            st.json(feats)
